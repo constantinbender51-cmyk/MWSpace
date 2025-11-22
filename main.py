@@ -1,348 +1,324 @@
 import pandas as pd
 import numpy as np
+from binance.client import Client
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-import requests
-from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use('Agg')  # Required for headless environments
 import io
 import base64
+from datetime import datetime, timedelta
 from flask import Flask, render_template_string
-import threading
-import time
+import warnings
+warnings.filterwarnings('ignore')
 
-app = Flask(__name__)
+# Initialize Binance client
+client = Client()
 
-class CryptoPredictor:
-    def __init__(self):
-        self.crypto_data = {}
-        self.models = {}
-        self.predictions = {}
-        
-    def fetch_crypto_data(self, symbol, start_date, end_date):
-        """Fetch daily candle data from Binance API"""
-        base_url = "https://api.binance.com/api/v3/klines"
-        
-        # Convert dates to milliseconds
-        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
-        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
-        
-        all_data = []
-        current_start = start_ts
-        
-        while current_start < end_ts:
-            params = {
-                'symbol': symbol,
-                'interval': '1d',
-                'limit': 1000,
-                'startTime': current_start,
-                'endTime': end_ts
-            }
-            
-            try:
-                response = requests.get(base_url, params=params)
-                data = response.json()
-                
-                if not data:
-                    break
-                    
-                for candle in data:
-                    all_data.append({
-                        'timestamp': candle[0],
-                        'open': float(candle[1]),
-                        'high': float(candle[2]),
-                        'low': float(candle[3]),
-                        'close': float(candle[4]),
-                        'volume': float(candle[5])
-                    })
-                
-                # Move to next time period
-                current_start = data[-1][0] + 86400000  # Add one day in milliseconds
-                
-            except Exception as e:
-                print(f"Error fetching data for {symbol}: {e}")
-                break
-        
-        return pd.DataFrame(all_data)
+def fetch_btc_data():
+    """Fetch BTC/USDT 1-minute data from Binance"""
+    print("Fetching BTC/USDT 1-minute data from Binance...")
     
-    def prepare_features(self, df):
-        """Prepare features for machine learning"""
-        df = df.copy()
-        df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.sort_values('date')
-        
-        # Create features
-        df['days'] = (df['date'] - df['date'].min()).dt.days
-        df['price_change'] = df['close'].pct_change()
-        df['volume_change'] = df['volume'].pct_change()
-        df['high_low_ratio'] = df['high'] / df['low']
-        
-        # Rolling features
-        df['ma_7'] = df['close'].rolling(window=7).mean()
-        df['ma_30'] = df['close'].rolling(window=30).mean()
-        df['volatility'] = df['close'].rolling(window=7).std()
-        
-        # Drop NaN values
-        df = df.dropna()
-        
-        return df
+    # Define date range
+    start_date = "2022-01-01"
+    end_date = "2023-09-30"
     
-    def train_model(self, symbol, df):
-        """Train linear regression model"""
-        # Features for training
-        feature_columns = ['days', 'ma_7', 'ma_30', 'volatility', 'high_low_ratio']
+    # Convert dates to milliseconds
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
+    
+    all_data = []
+    current_start = start_ts
+    
+    # Binance API has limits, so we need to fetch in chunks
+    while current_start < end_ts:
+        current_end = min(current_start + 1000 * 60 * 1000, end_ts)  # 1000 minutes per request
         
-        X = df[feature_columns]
-        y = df['close']
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, shuffle=False
+        klines = client.get_historical_klines(
+            "BTCUSDT",
+            Client.KLINE_INTERVAL_1MINUTE,
+            current_start,
+            current_end
         )
         
-        # Train model
-        model = LinearRegression()
-        model.fit(X_train, y_train)
+        if not klines:
+            break
+            
+        all_data.extend(klines)
+        current_start = current_end + 60000  # Move to next minute
         
-        # Make predictions on test set
-        y_pred = model.predict(X_test)
-        
-        # Calculate metrics
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        
-        print(f"{symbol} Model Performance:")
-        print(f"Mean Squared Error: {mse:.2f}")
-        print(f"R² Score: {r2:.4f}")
-        
-        return model, feature_columns, mse, r2
+        print(f"Fetched {len(klines)} records... Total: {len(all_data)}")
     
-    def predict_future(self, model, features, df, days_to_predict=30):
-        """Predict future prices"""
-        last_row = df.iloc[-1]
-        future_predictions = []
-        
-        for day in range(1, days_to_predict + 1):
-            future_day = last_row['days'] + day
-            
-            # Create future feature row (simplified - in practice you'd need to update all features)
-            future_features = [
-                future_day,
-                last_row['ma_7'],  # This would need proper updating in a real scenario
-                last_row['ma_30'],
-                last_row['volatility'],
-                last_row['high_low_ratio']
-            ]
-            
-            prediction = model.predict([future_features])[0]
-            future_predictions.append({
-                'days': future_day,
-                'predicted_price': prediction,
-                'date': last_row['date'] + timedelta(days=day)
-            })
-        
-        return pd.DataFrame(future_predictions)
+    # Convert to DataFrame
+    columns = [
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'number_of_trades',
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ]
     
-    def create_plot(self, symbol, historical_df, predictions_df):
-        """Create matplotlib plot with historical data and predictions"""
-        plt.figure(figsize=(15, 8))
-        
-        # Plot historical data
-        plt.plot(historical_df['date'], historical_df['close'], 
-                label='Historical Price', linewidth=2, color='blue', alpha=0.7)
-        
-        # Plot predictions
-        if not predictions_df.empty:
-            plt.plot(predictions_df['date'], predictions_df['predicted_price'], 
-                    label='Predicted Price', linewidth=2, color='red', linestyle='--')
-            
-            # Add confidence interval (simplified)
-            confidence = predictions_df['predicted_price'] * 0.1  # 10% confidence interval
-            plt.fill_between(predictions_df['date'], 
-                           predictions_df['predicted_price'] - confidence,
-                           predictions_df['predicted_price'] + confidence,
-                           alpha=0.2, color='red', label='Confidence Interval')
-        
-        plt.title(f'{symbol} Price History and Predictions\n(Jan 2022 - Sep 2023 + 30-day Prediction)', 
-                 fontsize=16, fontweight='bold')
-        plt.xlabel('Date', fontsize=12)
-        plt.ylabel('Price (USD)', fontsize=12)
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        # Convert plot to base64 string
-        img = io.BytesIO()
-        plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
-        img.seek(0)
-        plot_url = base64.b64encode(img.getvalue()).decode()
-        plt.close()
-        
-        return plot_url
+    df = pd.DataFrame(all_data, columns=columns)
+    
+    # Convert types
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col])
+    
+    df.set_index('timestamp', inplace=True)
+    df = df[['open', 'high', 'low', 'close', 'volume']]
+    
+    print(f"Total records fetched: {len(df)}")
+    return df
 
-# Initialize predictor
-predictor = CryptoPredictor()
+def prepare_features(df, lookback=10):
+    """Prepare features for the linear regression model"""
+    print("Preparing features...")
+    
+    # Create lagged features
+    for i in range(1, lookback + 1):
+        df[f'close_lag_{i}'] = df['close'].shift(i)
+        df[f'volume_lag_{i}'] = df['volume'].shift(i)
+    
+    # Create rolling statistics
+    df['close_rolling_mean_5'] = df['close'].rolling(window=5).mean()
+    df['close_rolling_std_5'] = df['close'].rolling(window=5).std()
+    df['volume_rolling_mean_5'] = df['volume'].rolling(window=5).mean()
+    
+    # Price changes
+    df['price_change'] = df['close'].pct_change()
+    
+    # Remove rows with NaN values
+    df = df.dropna()
+    
+    return df
 
-# HTML template for the web page
-HTML_TEMPLATE = '''
+def train_linear_regression(df):
+    """Train linear regression model and make predictions"""
+    print("Training linear regression model...")
+    
+    # Define features and target
+    feature_columns = [col for col in df.columns if col not in ['close', 'price_change']]
+    X = df[feature_columns]
+    y = df['close']
+    
+    # Split data (40% test set)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.4, shuffle=False, random_state=42
+    )
+    
+    # Train model
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    
+    # Make predictions
+    y_pred_train = model.predict(X_train)
+    y_pred_test = model.predict(X_test)
+    
+    # Calculate metrics
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+    test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    train_r2 = r2_score(y_train, y_pred_train)
+    test_r2 = r2_score(y_test, y_pred_test)
+    
+    print(f"Training RMSE: {train_rmse:.2f}")
+    print(f"Test RMSE: {test_rmse:.2f}")
+    print(f"Training R²: {train_r2:.4f}")
+    print(f"Test R²: {test_r2:.4f}")
+    
+    return {
+        'model': model,
+        'X_train': X_train,
+        'X_test': X_test,
+        'y_train': y_train,
+        'y_test': y_test,
+        'y_pred_train': y_pred_train,
+        'y_pred_test': y_pred_test,
+        'train_rmse': train_rmse,
+        'test_rmse': test_rmse,
+        'train_r2': train_r2,
+        'test_r2': test_r2,
+        'feature_columns': feature_columns
+    }
+
+def create_plot(results):
+    """Create comparison plot of predictions vs actual prices"""
+    print("Creating visualization...")
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12))
+    
+    # Plot 1: Training set results
+    ax1.plot(results['y_train'].values[:1000], label='Actual', alpha=0.7, linewidth=1)
+    ax1.plot(results['y_pred_train'][:1000], label='Predicted', alpha=0.7, linewidth=1)
+    ax1.set_title('Linear Regression - Training Set (First 1000 samples)')
+    ax1.set_ylabel('BTC Price (USDT)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Test set results
+    test_samples = min(1000, len(results['y_test']))
+    ax2.plot(results['y_test'].values[:test_samples], label='Actual', alpha=0.7, linewidth=1)
+    ax2.plot(results['y_pred_test'][:test_samples], label='Predicted', alpha=0.7, linewidth=1)
+    ax2.set_title('Linear Regression - Test Set (40% of data)')
+    ax2.set_ylabel('BTC Price (USDT)')
+    ax2.set_xlabel('Time Index')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Convert plot to base64 for HTML display
+    img = io.BytesIO()
+    plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode()
+    plt.close()
+    
+    return plot_url
+
+# HTML template for the web server
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Crypto Price Predictions</title>
+    <title>BTC Price Prediction - Linear Regression</title>
     <style>
         body {
             font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
+            margin: 40px;
             background-color: #f5f5f5;
         }
         .container {
             max-width: 1200px;
             margin: 0 auto;
             background: white;
-            padding: 20px;
+            padding: 30px;
             border-radius: 10px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         h1 {
-            text-align: center;
             color: #333;
-            margin-bottom: 30px;
-        }
-        .crypto-section {
-            margin-bottom: 40px;
-            padding: 20px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-        }
-        .plot-container {
             text-align: center;
-            margin: 20px 0;
         }
         .metrics {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin: 30px 0;
+        }
+        .metric-card {
             background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #007bff;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .plot {
+            text-align: center;
+            margin: 30px 0;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .info {
+            background: #e7f3ff;
             padding: 15px;
             border-radius: 5px;
-            margin: 10px 0;
-        }
-        .last-update {
-            text-align: center;
-            color: #666;
-            font-style: italic;
-            margin-top: 30px;
+            margin: 20px 0;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Cryptocurrency Price Predictions</h1>
-        <p style="text-align: center;">Historical data from January 2022 to September 2023 with 30-day predictions</p>
+        <h1>BTC Price Prediction using Linear Regression</h1>
         
-        {% for crypto in cryptos %}
-        <div class="crypto-section">
-            <h2>{{ crypto.symbol }}</h2>
-            <div class="metrics">
-                <strong>Model Performance:</strong><br>
-                Mean Squared Error: {{ "%.2f"|format(crypto.mse) }}<br>
-                R² Score: {{ "%.4f"|format(crypto.r2) }}<br>
-                Data Points: {{ crypto.data_points }}
+        <div class="info">
+            <strong>Data Period:</strong> January 2022 - September 2023<br>
+            <strong>Timeframe:</strong> 1-minute<br>
+            <strong>Test Set Size:</strong> 40% of total data<br>
+            <strong>Model:</strong> Linear Regression with lagged features
+        </div>
+        
+        <div class="metrics">
+            <div class="metric-card">
+                <h3>Training RMSE</h3>
+                <div class="metric-value">{{ train_rmse }}</div>
             </div>
-            <div class="plot-container">
-                <img src="data:image/png;base64,{{ crypto.plot_url }}" alt="{{ crypto.symbol }} Price Chart">
+            <div class="metric-card">
+                <h3>Test RMSE</h3>
+                <div class="metric-value">{{ test_rmse }}</div>
+            </div>
+            <div class="metric-card">
+                <h3>Training R² Score</h3>
+                <div class="metric-value">{{ train_r2 }}</div>
+            </div>
+            <div class="metric-card">
+                <h3>Test R² Score</h3>
+                <div class="metric-value">{{ test_r2 }}</div>
             </div>
         </div>
-        {% endfor %}
         
-        <div class="last-update">
-            Last updated: {{ last_update }}
+        <div class="plot">
+            <h2>Predictions vs Actual Prices</h2>
+            <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Price Prediction Results">
+        </div>
+        
+        <div class="info">
+            <strong>Note:</strong> Linear regression on financial time series data, especially at 1-minute intervals, 
+            may not capture complex market dynamics. This is for educational purposes.
         </div>
     </div>
 </body>
 </html>
-'''
+"""
 
-def update_data():
-    """Update cryptocurrency data and models periodically"""
-    symbols = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']
-    
-    while True:
-        try:
-            print("Updating cryptocurrency data...")
-            
-            for symbol in symbols:
-                print(f"Fetching data for {symbol}...")
-                
-                # Fetch historical data
-                df = predictor.fetch_crypto_data(symbol, '2022-01-01', '2023-09-30')
-                
-                if len(df) > 0:
-                    # Prepare features
-                    processed_df = predictor.prepare_features(df)
-                    
-                    # Train model
-                    model, features, mse, r2 = predictor.train_model(symbol, processed_df)
-                    
-                    # Make future predictions
-                    future_predictions = predictor.predict_future(model, features, processed_df, days_to_predict=30)
-                    
-                    # Create plot
-                    plot_url = predictor.create_plot(symbol, processed_df, future_predictions)
-                    
-                    # Store results
-                    predictor.crypto_data[symbol] = {
-                        'historical_df': processed_df,
-                        'predictions_df': future_predictions,
-                        'model': model,
-                        'mse': mse,
-                        'r2': r2,
-                        'plot_url': plot_url,
-                        'data_points': len(processed_df)
-                    }
-                    
-                    print(f"Successfully processed {symbol} with {len(processed_df)} data points")
-                else:
-                    print(f"No data fetched for {symbol}")
-            
-            print("Data update completed. Waiting 1 hour until next update...")
-            time.sleep(3600)  # Update every hour
-            
-        except Exception as e:
-            print(f"Error in update_data: {e}")
-            time.sleep(300)  # Wait 5 minutes before retrying
+def main():
+    """Main function to run the entire pipeline"""
+    try:
+        # Fetch data
+        df = fetch_btc_data()
+        
+        if len(df) == 0:
+            print("No data fetched. Please check your internet connection and try again.")
+            return
+        
+        # Prepare features
+        df_processed = prepare_features(df)
+        
+        # Train model
+        results = train_linear_regression(df_processed)
+        
+        # Create plot
+        plot_url = create_plot(results)
+        
+        # Start web server
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def index():
+            return render_template_string(HTML_TEMPLATE,
+                train_rmse=f"{results['train_rmse']:.2f}",
+                test_rmse=f"{results['test_rmse']:.2f}",
+                train_r2=f"{results['train_r2']:.4f}",
+                test_r2=f"{results['test_r2']:.4f}",
+                plot_url=plot_url
+            )
+        
+        print("\nWeb server starting on http://0.0.0.0:8080")
+        print("Press Ctrl+C to stop the server")
+        
+        app.run(host='0.0.0.0', port=8080, debug=False)
+        
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        print("Please make sure you have installed all required packages:")
+        print("pip install pandas numpy scikit-learn matplotlib flask python-binance")
 
-@app.route('/')
-def index():
-    """Main page displaying crypto predictions"""
-    cryptos = []
-    
-    for symbol in ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']:
-        if symbol in predictor.crypto_data:
-            crypto_info = predictor.crypto_data[symbol]
-            cryptos.append({
-                'symbol': symbol.replace('USDT', ''),
-                'plot_url': crypto_info['plot_url'],
-                'mse': crypto_info['mse'],
-                'r2': crypto_info['r2'],
-                'data_points': crypto_info['data_points']
-            })
-    
-    return render_template_string(HTML_TEMPLATE, 
-                                cryptos=cryptos,
-                                last_update=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-if __name__ == '__main__':
-    # Start data update thread
-    update_thread = threading.Thread(target=update_data, daemon=True)
-    update_thread.start()
-    
-    # Wait a bit for initial data load
-    print("Loading initial data...")
-    time.sleep(10)
-    
-    # Start web server
-    print("Starting web server on http://0.0.0.0:8080")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+if __name__ == "__main__":
+    main()
